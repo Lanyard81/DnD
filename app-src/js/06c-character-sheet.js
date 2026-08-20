@@ -41,7 +41,27 @@ async function ScreenCharacterSheet(root, campaignId, characterId) {
       toast('Character deleted.', 'success');
       Router.go(`#/campaigns/${campaignId}`);
     };
-    root.querySelector('#portraitBtn').onclick = () => root.querySelector('#portraitFile').click();
+    root.querySelector('#portraitBtn').onclick = () => {
+      openModal(`
+        <h2>Set Portrait</h2>
+        <div class="row" style="margin-top:1rem">
+          <button class="btn block" id="pcCancel">Cancel</button>
+          <button class="btn block" id="pcGallery">Choose Portrait</button>
+          <button class="btn primary block" id="pcUpload">Upload Photo</button>
+        </div>
+      `, (m) => {
+        m.querySelector('#pcCancel').onclick = closeModal;
+        m.querySelector('#pcUpload').onclick = () => { closeModal(); root.querySelector('#portraitFile').click(); };
+        m.querySelector('#pcGallery').onclick = () => {
+          closeModal();
+          openPortraitGallery(async (dataUrl) => {
+            char.portraitImage = dataUrl;
+            await DB.put('characters', char);
+            render();
+          });
+        };
+      });
+    };
     root.querySelector('#portraitFile').onchange = async (e) => {
       const file = e.target.files[0];
       if (!file) return;

@@ -39,3 +39,38 @@ export function isSideDefeated(order, hpLookup, sideOf, side) {
   if (members.length === 0) return true;
   return members.every(id => isCombatantDown(hpLookup[id]));
 }
+
+// Damage-type resistance/immunity/vulnerability. `entity` carries
+// resistances/immunities/vulnerabilities: string[] of lowercase damage-type
+// tags (e.g. "fire"). No damageType or no match on any list is a straight
+// 1x multiplier — this only ever narrows or widens an already-rolled amount,
+// it never re-rolls anything.
+export function resistanceMultiplier(damageType, entity) {
+  if (!damageType || !entity) return 1;
+  const type = String(damageType).trim().toLowerCase();
+  if (!type) return 1;
+  const has = (arr) => Array.isArray(arr) && arr.some(t => String(t).trim().toLowerCase() === type);
+  if (has(entity.immunities)) return 0;
+  if (has(entity.resistances)) return 0.5;
+  if (has(entity.vulnerabilities)) return 2;
+  return 1;
+}
+export function applyDamageWithResistance(amount, damageType, entity) {
+  return Math.floor(Math.max(0, amount) * resistanceMultiplier(damageType, entity));
+}
+
+// Total saving-throw bonus for one ability against one target. `info.abilities`
+// is the standard {str,dex,con,int,wis,cha} score object. Two supported
+// shapes for info.savingThrows, matching how characters vs. monsters store
+// it in this codebase: a character's {ability: {proficient}} (added to
+// ability mod + a supplied proficiency bonus), or a monster's flat
+// {ability: totalBonus} (already includes ability mod + whatever else the
+// DM entered, used as-is — matches how printed stat blocks list saves).
+export function saveBonusFor(info, ability, profBonus) {
+  const abilities = (info && info.abilities) || {};
+  const mod = Math.floor((Number(abilities[ability] ?? 10) - 10) / 2);
+  const st = ((info && info.savingThrows) || {})[ability];
+  if (typeof st === 'number') return st;
+  const proficient = !!(st && st.proficient);
+  return mod + (proficient ? Math.max(0, profBonus || 0) : 0);
+}

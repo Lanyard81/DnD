@@ -589,6 +589,27 @@ function isSideDefeated(order, hpLookup, sideOf, side) {
   if (members.length === 0) return true;
   return members.every(id => isCombatantDown(hpLookup[id]));
 }
+function resistanceMultiplier(damageType, entity) {
+  if (!damageType || !entity) return 1;
+  const type = String(damageType).trim().toLowerCase();
+  if (!type) return 1;
+  const has = (arr) => Array.isArray(arr) && arr.some(t => String(t).trim().toLowerCase() === type);
+  if (has(entity.immunities)) return 0;
+  if (has(entity.resistances)) return 0.5;
+  if (has(entity.vulnerabilities)) return 2;
+  return 1;
+}
+function applyDamageWithResistance(amount, damageType, entity) {
+  return Math.floor(Math.max(0, amount) * resistanceMultiplier(damageType, entity));
+}
+function saveBonusFor(info, ability, profBonus) {
+  const abilities = (info && info.abilities) || {};
+  const mod = Math.floor((Number(abilities[ability] ?? 10) - 10) / 2);
+  const st = ((info && info.savingThrows) || {})[ability];
+  if (typeof st === 'number') return st;
+  const proficient = !!(st && st.proficient);
+  return mod + (proficient ? Math.max(0, profBonus || 0) : 0);
+}
 
 // ---- Grid core functions ----
 // Mirrored 1:1 from src/grid-core.mjs (see tests/grid-core.test.mjs).
@@ -1275,15 +1296,16 @@ async function addBotRecentEvent(campaignId, botId, text) {
 // hp/ac/conditions/attacks alongside refType/refId for traceability. This is
 // an intentional, documented extension of the schema, not a drift — see
 // DECISIONS.md D13.
-function makeMonster({ campaignId, name, ac, hpMax, attackName, attackBonus, damageDice, damageType }) {
+function makeMonster({ campaignId, name, ac, hpMax, attackName, attackBonus, damageDice, damageType, attackCount, resistances, immunities, vulnerabilities, savingThrows }) {
   return {
     id: uid(), campaignId: campaignId || null, name, size: 'medium', type: 'monstrosity',
     ac: ac || 10, hp: { formula: '', max: hpMax || 10 }, speed: 30,
     abilities: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
-    savingThrows: {}, skills: {}, resistances: [], immunities: [], vulnerabilities: [],
+    savingThrows: savingThrows || {}, skills: {},
+    resistances: resistances || [], immunities: immunities || [], vulnerabilities: vulnerabilities || [],
     senses: '', languages: '', challengeRating: 0,
     traits: [],
-    actions: [{ name: attackName || 'Strike', attackBonus: attackBonus || '+3', damageDice: damageDice || '1d6+1', damageType: damageType || 'bludgeoning' }],
+    actions: [{ name: attackName || 'Strike', attackBonus: attackBonus || '+3', damageDice: damageDice || '1d6+1', damageType: damageType || 'bludgeoning', attackCount: Math.max(1, attackCount || 1) }],
     legendaryActions: null, tokenImage: null
   };
 }
@@ -1301,8 +1323,8 @@ async function combatantFromCharacter(char, bot) {
   let spell = null;
   for (const spellId of (char.spellsKnown || [])) {
     const s = await DB.get('spells', spellId);
-    if (s && s.damageDice) { spell = { type: 'damage', formula: s.damageDice, name: s.name }; break; }
-    if (s && s.healFormula) { spell = { type: 'heal', formula: s.healFormula, name: s.name }; break; }
+    if (s && s.damageDice) { spell = { type: 'damage', formula: s.damageDice, name: s.name, level: s.level || 1 }; break; }
+    if (s && s.healFormula) { spell = { type: 'heal', formula: s.healFormula, name: s.name, level: s.level || 1 }; break; }
   }
   return {
     id: uid(), refType: 'character', refId: char.id,
@@ -1310,6 +1332,8 @@ async function combatantFromCharacter(char, bot) {
     hp: { current: char.hp.current, max: char.hp.max, temp: char.hp.temp || 0 },
     ac: char.ac, initiativeBonus: char.initiativeBonus || 0,
     primaryAbilityMod: Math.max(abilityMod(char.abilities.str), abilityMod(char.abilities.dex)),
+    abilities: char.abilities, savingThrows: char.savingThrows || {}, level: char.level || 1,
+    resistances: char.resistances || [], immunities: char.immunities || [], vulnerabilities: char.vulnerabilities || [],
     conditions: [], attacks: char.attacks || [], spell,
     isBot: char.controlledBy === 'bot',
     combatStyle: bot ? bot.combatStyle : 'moderate',
@@ -1326,7 +1350,9 @@ function combatantFromMonster(monster, index, total) {
     name: total > 1 ? `${monster.name} ${index + 1}` : monster.name, side: 'enemy',
     hp: { current: monster.hp.max, max: monster.hp.max, temp: 0 },
     ac: monster.ac, initiativeBonus: 0,
-    conditions: [], attacks: [{ id: uid(), name: action.name, attackBonus: action.attackBonus, damageDice: action.damageDice, damageType: action.damageType, notes: '' }],
+    abilities: monster.abilities || {}, savingThrows: monster.savingThrows || {},
+    resistances: monster.resistances || [], immunities: monster.immunities || [], vulnerabilities: monster.vulnerabilities || [],
+    conditions: [], attacks: [{ id: uid(), name: action.name, attackBonus: action.attackBonus, damageDice: action.damageDice, damageType: action.damageType, attackCount: Math.max(1, action.attackCount || 1), notes: '' }],
     isBot: true, combatStyle: 'simple', isHealer: false, role: 'minion', botId: null,
     initiativeRoll: 0, hasActed: false
   };
@@ -1355,8 +1381,13 @@ function encounterSideLookup(encounter) {
 async function startEncounter(campaignId, name, partyCombatants, monsterDrafts) {
   const combatants = [...partyCombatants];
   for (const draft of monsterDrafts) {
-    const monster = makeMonster({ campaignId, name: draft.name, ac: draft.ac, hpMax: draft.hp, attackBonus: draft.attackBonus, damageDice: draft.damageDice, damageType: draft.damageType });
-    await DB.put('monsters', monster);
+    // A draft picked from the homebrew Monster Library carries its source
+    // row's id — reuse that row instead of minting a new `monsters` entry,
+    // so repeated encounters with the same library monster don't pile up
+    // duplicate rows (see DECISIONS.md D20).
+    let monster = draft.libraryMonsterId ? await DB.get('monsters', draft.libraryMonsterId) : null;
+    if (!monster) monster = makeMonster({ campaignId, name: draft.name, ac: draft.ac, hpMax: draft.hp, attackBonus: draft.attackBonus, damageDice: draft.damageDice, damageType: draft.damageType });
+    if (!draft.libraryMonsterId) await DB.put('monsters', monster);
     for (let i = 0; i < draft.qty; i++) combatants.push(combatantFromMonster(monster, i, draft.qty));
   }
   combatants.forEach(c => { c.initiativeRoll = rollD20(c.initiativeBonus, 'none').total; });
@@ -1388,10 +1419,12 @@ async function combatAttack(encounter, attacker, target) {
     const dmgResult = rollFormula(dmgParsed);
     const dmgRoll = makeDiceRoll({ campaignId: encounter.campaignId, actorType: attacker.isBot ? 'bot' : 'player', actorId: attacker.refId, formula: atk.damageDice, dice: dmgResult.dice, modifier: dmgResult.modifier, total: dmgResult.total, purpose: `${atk.name} damage` });
     await DB.put('dice_rolls', dmgRoll);
-    let remaining = dmgResult.total;
+    const applied = applyDamageWithResistance(dmgResult.total, atk.damageType, target);
+    let remaining = applied;
     if (target.hp.temp > 0) { const absorbed = Math.min(target.hp.temp, remaining); target.hp.temp -= absorbed; remaining -= absorbed; }
     target.hp.current = clamp(target.hp.current - remaining, 0, target.hp.max);
-    resultSummary = `${attacker.name} hits ${target.name} with ${atk.name} for ${dmgResult.total} (${atk.damageType || 'damage'}). ${target.name} at ${target.hp.current}/${target.hp.max} HP.`;
+    const resistNote = applied !== dmgResult.total ? ` (${applied === 0 ? 'immune' : applied < dmgResult.total ? 'resisted' : 'vulnerable'}, ${applied} taken)` : '';
+    resultSummary = `${attacker.name} hits ${target.name} with ${atk.name} for ${dmgResult.total} (${atk.damageType || 'damage'})${resistNote}. ${target.name} at ${target.hp.current}/${target.hp.max} HP.`;
   } else {
     resultSummary = `${attacker.name} attacks ${target.name} with ${atk.name} and misses (rolled ${roll.total} vs AC ${target.ac}).`;
   }
@@ -1433,10 +1466,33 @@ async function resolveBotTurn(encounter, combatant) {
   const action = chooseBotAction(combatant.combatStyle, situation);
   if (action.type === 'attack') {
     const target = findCombatant(encounter, action.targetId);
-    if (target) return await combatAttack(encounter, combatant, target);
+    if (target) {
+      const atk = getPrimaryAttack(combatant);
+      const swings = Math.max(1, atk.attackCount || 1);
+      let last = null;
+      for (let i = 0; i < swings; i++) {
+        const liveTarget = findCombatant(encounter, target.id);
+        if (!liveTarget || isCombatantDown(liveTarget.hp.current)) break;
+        last = await combatAttack(encounter, combatant, liveTarget);
+      }
+      return last;
+    }
   } else if (action.type === 'cast') {
     const target = findCombatant(encounter, action.targetId);
-    if (target) return await combatCast(encounter, combatant, target, combatant.spell);
+    if (target) {
+      // Spell casting draws down a real spell slot on the underlying
+      // character (combatants are per-encounter snapshots — see D13 — so the
+      // slot lives on the DB row, not this object). No slot left, or this
+      // isn't a slot-tracked caster: fall back to a mundane attack instead
+      // of casting for free (closes D19's original "no slot consumption" gap).
+      const level = (combatant.spell && combatant.spell.level) || 1;
+      const char = combatant.refType === 'character' ? await DB.get('characters', combatant.refId) : null;
+      if (char && consumeSpellSlot(char, level)) {
+        await DB.put('characters', char);
+        return await combatCast(encounter, combatant, target, combatant.spell);
+      }
+      return await combatAttack(encounter, combatant, target);
+    }
   } else if (action.type === 'heal') {
     const target = findCombatant(encounter, action.targetId);
     if (target) return await combatHeal(encounter, combatant, target);
@@ -1692,15 +1748,52 @@ const HOMEBREW_SCHEMAS = {
       { key: 'attackName', label: 'Attack name', type: 'text' },
       { key: 'attackBonus', label: 'Attack bonus', type: 'text' },
       { key: 'damageDice', label: 'Damage dice', type: 'text' },
-      { key: 'damageType', label: 'Damage type', type: 'text' }
+      { key: 'damageType', label: 'Damage type', type: 'text' },
+      { key: 'attackCount', label: 'Attacks per turn (multiattack)', type: 'number' },
+      { key: 'saveBonusText', label: 'Saving throw bonuses (e.g. dex:4, wis:2)', type: 'text' },
+      { key: 'resistancesText', label: 'Resistances (comma-separated, e.g. fire, cold)', type: 'text' },
+      { key: 'immunitiesText', label: 'Immunities (comma-separated)', type: 'text' },
+      { key: 'vulnerabilitiesText', label: 'Vulnerabilities (comma-separated)', type: 'text' }
     ],
-    blank: () => ({ id: uid(), campaignId: null, ac: 12, hpMax: 10, attackName: 'Strike', attackBonus: '+3', damageDice: '1d6+1', damageType: 'bludgeoning', name: '' }),
-    onLoad: (row) => ({ id: row.id, campaignId: row.campaignId, name: row.name, ac: row.ac, hpMax: row.hp ? row.hp.max : 10, attackName: (row.actions && row.actions[0] && row.actions[0].name) || 'Strike', attackBonus: (row.actions && row.actions[0] && row.actions[0].attackBonus) || '+3', damageDice: (row.actions && row.actions[0] && row.actions[0].damageDice) || '1d6', damageType: (row.actions && row.actions[0] && row.actions[0].damageType) || 'bludgeoning' }),
+    blank: () => ({ id: uid(), campaignId: null, ac: 12, hpMax: 10, attackName: 'Strike', attackBonus: '+3', damageDice: '1d6+1', damageType: 'bludgeoning', attackCount: 1, saveBonusText: '', resistancesText: '', immunitiesText: '', vulnerabilitiesText: '', name: '' }),
+    onLoad: (row) => ({
+      id: row.id, campaignId: row.campaignId, name: row.name, ac: row.ac, hpMax: row.hp ? row.hp.max : 10,
+      attackName: (row.actions && row.actions[0] && row.actions[0].name) || 'Strike',
+      attackBonus: (row.actions && row.actions[0] && row.actions[0].attackBonus) || '+3',
+      damageDice: (row.actions && row.actions[0] && row.actions[0].damageDice) || '1d6',
+      damageType: (row.actions && row.actions[0] && row.actions[0].damageType) || 'bludgeoning',
+      attackCount: (row.actions && row.actions[0] && row.actions[0].attackCount) || 1,
+      saveBonusText: fmtSaveBonusText(row.savingThrows),
+      resistancesText: (row.resistances || []).join(', '),
+      immunitiesText: (row.immunities || []).join(', '),
+      vulnerabilitiesText: (row.vulnerabilities || []).join(', ')
+    }),
     // onSave returns a monster shape via makeMonster(); the generic screen
     // overwrites .id/.campaignId afterward so edits keep their original id.
-    onSave: (data) => makeMonster({ campaignId: data.campaignId, name: data.name, ac: data.ac, hpMax: data.hpMax, attackName: data.attackName, attackBonus: data.attackBonus, damageDice: data.damageDice, damageType: data.damageType })
+    onSave: (data) => makeMonster({
+      campaignId: data.campaignId, name: data.name, ac: data.ac, hpMax: data.hpMax,
+      attackName: data.attackName, attackBonus: data.attackBonus, damageDice: data.damageDice, damageType: data.damageType,
+      attackCount: data.attackCount,
+      savingThrows: parseSaveBonusText(data.saveBonusText),
+      resistances: parseTagList(data.resistancesText),
+      immunities: parseTagList(data.immunitiesText),
+      vulnerabilities: parseTagList(data.vulnerabilitiesText)
+    })
   }
 };
+
+function parseTagList(text) { return (text || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean); }
+function parseSaveBonusText(text) {
+  const out = {};
+  (text || '').split(',').forEach(part => {
+    const [k, v] = part.split(':').map(s => (s || '').trim().toLowerCase());
+    if (k && ABILITIES.includes(k) && v !== undefined && v !== '') out[k] = parseInt(v) || 0;
+  });
+  return out;
+}
+function fmtSaveBonusText(obj) {
+  return Object.entries(obj || {}).map(([k, v]) => `${k}:${v}`).join(', ');
+}
 
 function parseWeightedLines(text) {
   return (text || '').split('\n').map(l => l.trim()).filter(Boolean).map(line => {
@@ -1915,6 +2008,15 @@ function shortRestChanges(char, healAmount) {
   const current = Math.min(char.hp.max, char.hp.current + Math.max(0, healAmount));
   return { hp: { current, max: char.hp.max, temp: char.hp.temp } };
 }
+function hasSpellSlot(char, level) {
+  const slot = char && char.spellSlots && char.spellSlots[level];
+  return !!(slot && slot.current > 0);
+}
+function consumeSpellSlot(char, level) {
+  if (!hasSpellSlot(char, level)) return false;
+  char.spellSlots[level].current -= 1;
+  return true;
+}
 const CONDITION_LIBRARY = {
   prone: 'Attacks against them from nearby have the edge; their own attacks don\'t.',
   restrained: 'Can\'t move. Attacks against them have the edge; their own attacks don\'t.',
@@ -1978,6 +2080,45 @@ function closeModal() {
   const el = document.getElementById('activeModal');
   if (el) el.remove();
   activeModalCleanup = null;
+}
+
+/* ---------- Bundled portrait gallery (assets/portraits/bust-01..25.jpg) ---------- */
+const PORTRAIT_GALLERY = Array.from({ length: 25 }, (_, i) => `assets/portraits/bust-${String(i + 1).padStart(2, '0')}.jpg`);
+
+async function urlToDataUrl(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('fetch failed');
+  const blob = await resp.blob();
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(blob);
+  });
+}
+
+function openPortraitGallery(onPick) {
+  openModal(`
+    <h2>Choose a Portrait</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:.5rem;max-height:60vh;overflow-y:auto;margin-top:.5rem">
+      ${PORTRAIT_GALLERY.map((src, i) => `<button class="portraitGalleryItem" data-src="${src}" style="padding:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;cursor:pointer;aspect-ratio:1;background:var(--bg-input)"><img src="${src}" alt="Portrait ${i + 1}" style="width:100%;height:100%;object-fit:cover;display:block" loading="lazy"></button>`).join('')}
+    </div>
+    <div class="row" style="margin-top:1rem"><button class="btn block" id="pgCancel">Cancel</button></div>
+  `, (root) => {
+    root.querySelector('#pgCancel').onclick = closeModal;
+    root.querySelectorAll('.portraitGalleryItem').forEach((btn) => {
+      btn.onclick = async () => {
+        const src = btn.getAttribute('data-src');
+        try {
+          const dataUrl = await urlToDataUrl(src);
+          closeModal();
+          onPick(dataUrl);
+        } catch (e) {
+          toast("Couldn't load that portrait — is the assets/portraits folder present?", 'error');
+        }
+      };
+    });
+  });
 }
 
 function confirmDialog(message, { okLabel = 'Confirm', danger = false } = {}) {
@@ -2655,7 +2796,27 @@ async function ScreenCharacterSheet(root, campaignId, characterId) {
       toast('Character deleted.', 'success');
       Router.go(`#/campaigns/${campaignId}`);
     };
-    root.querySelector('#portraitBtn').onclick = () => root.querySelector('#portraitFile').click();
+    root.querySelector('#portraitBtn').onclick = () => {
+      openModal(`
+        <h2>Set Portrait</h2>
+        <div class="row" style="margin-top:1rem">
+          <button class="btn block" id="pcCancel">Cancel</button>
+          <button class="btn block" id="pcGallery">Choose Portrait</button>
+          <button class="btn primary block" id="pcUpload">Upload Photo</button>
+        </div>
+      `, (m) => {
+        m.querySelector('#pcCancel').onclick = closeModal;
+        m.querySelector('#pcUpload').onclick = () => { closeModal(); root.querySelector('#portraitFile').click(); };
+        m.querySelector('#pcGallery').onclick = () => {
+          closeModal();
+          openPortraitGallery(async (dataUrl) => {
+            char.portraitImage = dataUrl;
+            await DB.put('characters', char);
+            render();
+          });
+        };
+      });
+    };
     root.querySelector('#portraitFile').onchange = async (e) => {
       const file = e.target.files[0];
       if (!file) return;
@@ -3634,6 +3795,7 @@ async function ScreenEncounterBuilder(root, campaignId) {
       if (!m) return;
       const action = m.actions[0] || {};
       monsterDrafts.push({
+        libraryMonsterId: m.id,
         name: m.name, hp: m.hp.max, ac: m.ac,
         qty: clamp(parseInt(root.querySelector('#libraryMonsterQty').value) || 1, 1, 12),
         attackBonus: action.attackBonus || '+3', damageDice: action.damageDice || '1d6', damageType: action.damageType || 'bludgeoning'
@@ -3827,7 +3989,7 @@ async function ScreenCombat(root, campaignId, encounterId) {
       <h2>${escapeHtml(attacker.name)} attacks</h2>
       <div class="field">
         <label>Attack</label>
-        <select id="atkSelect">${attackOptions.map((a, i) => `<option value="${i}">${escapeHtml(a.name)} (${escapeHtml(a.attackBonus)}, ${escapeHtml(a.damageDice)})</option>`).join('')}</select>
+        <select id="atkSelect">${attackOptions.map((a, i) => `<option value="${i}">${escapeHtml(a.name)} (${escapeHtml(a.attackBonus)}, ${escapeHtml(a.damageDice)})${a.attackCount > 1 ? ` — ×${a.attackCount}` : ''}</option>`).join('')}</select>
       </div>
       <div class="field">
         <label>Target</label>
@@ -3842,10 +4004,15 @@ async function ScreenCombat(root, campaignId, encounterId) {
       rootEl.querySelector('#atkGo').onclick = async () => {
         const atkIdx = parseInt(rootEl.querySelector('#atkSelect').value);
         const targetId = rootEl.querySelector('#tgtSelect').value;
-        const target = findCombatant(encounter, targetId);
-        const chosenAttacker = { ...attacker, attacks: [attackOptions[atkIdx]] };
+        const chosenAttack = attackOptions[atkIdx];
+        const chosenAttacker = { ...attacker, attacks: [chosenAttack] };
+        const swings = Math.max(1, chosenAttack.attackCount || 1);
         closeModal();
-        await combatAttack(encounter, chosenAttacker, target);
+        for (let i = 0; i < swings; i++) {
+          const target = findCombatant(encounter, targetId);
+          if (!target || isCombatantDown(target.hp.current)) break;
+          await combatAttack(encounter, chosenAttacker, target);
+        }
         await persist();
         if (await checkCombatEnd()) { render(); return; }
         render();
@@ -4284,15 +4451,33 @@ async function ScreenMapView(root, campaignId, mapId) {
     }).filter(Boolean);
   }
 
+  // Normalizes a resolveAoeTargets() entry into the {abilities, savingThrows,
+  // level, resistances, immunities, vulnerabilities} shape saveBonusFor() and
+  // applyDamageWithResistance() expect, regardless of whether it's a live
+  // combatant (character or monster) or an out-of-combat character.
+  function aoeEntityInfo(t) {
+    const source = t.kind === 'combatant' ? t.combatant : t.char;
+    return {
+      abilities: source.abilities || {}, savingThrows: source.savingThrows || {}, level: source.level || 1,
+      resistances: source.resistances || [], immunities: source.immunities || [], vulnerabilities: source.vulnerabilities || []
+    };
+  }
+
   function openApplyEffectModal() {
     const targets = resolveAoeTargets();
     openModal(`
       <h2>Apply Effect</h2>
       ${targets.length ? `<p class="hint">Will affect: ${targets.map(t => escapeHtml(t.token.name)).join(', ')}</p>` : `<p class="hint">No damageable tokens are standing in the highlighted cells. Place tokens first, or this will just log a note.</p>`}
       <div class="field"><label>Damage formula (optional)</label><input type="text" id="aoeDamage" placeholder="e.g. 4d6"></div>
+      <div class="field"><label>Damage type (optional, for resistance/immunity/vulnerability)</label><input type="text" id="aoeDamageType" placeholder="e.g. fire"></div>
       <div class="field"><label>Heal formula (optional)</label><input type="text" id="aoeHeal" placeholder="e.g. 2d8"></div>
       <div class="field"><label>Condition to apply (optional)</label><input type="text" id="aoeCondition" placeholder="e.g. Prone" list="condSuggestListMap"></div>
       <datalist id="condSuggestListMap">${Object.keys(CONDITION_LIBRARY).map(c => `<option value="${c[0].toUpperCase() + c.slice(1)}">`).join('')}</datalist>
+      <div class="row" style="gap:.5rem">
+        <div class="field" style="flex:1"><label>Save DC (optional)</label><input type="number" id="aoeSaveDc" placeholder="e.g. 14"></div>
+        <div class="field" style="flex:1"><label>Save ability</label><select id="aoeSaveAbility">${ABILITIES.map(a => `<option value="${a}">${a.toUpperCase()}</option>`).join('')}</select></div>
+      </div>
+      <p class="hint">A save DC rolls each target's own saving throw: damage is halved and the condition is skipped on a success. Leave it blank to hit everyone automatically, as before.</p>
       <div class="row" style="margin-top:1rem">
         <button class="btn block" id="aoeEffectCancel">Cancel</button>
         <button class="btn primary block" id="aoeEffectGo">Apply</button>
@@ -4301,12 +4486,15 @@ async function ScreenMapView(root, campaignId, mapId) {
       rootEl.querySelector('#aoeEffectCancel').onclick = closeModal;
       rootEl.querySelector('#aoeEffectGo').onclick = async () => {
         const dmgFormula = rootEl.querySelector('#aoeDamage').value.trim();
+        const dmgType = rootEl.querySelector('#aoeDamageType').value.trim();
         const healFormula = rootEl.querySelector('#aoeHeal').value.trim();
         const condition = rootEl.querySelector('#aoeCondition').value.trim();
-        let dmgTotal = null, healTotal = null;
+        const saveDc = parseInt(rootEl.querySelector('#aoeSaveDc').value) || 0;
+        const saveAbility = rootEl.querySelector('#aoeSaveAbility').value;
+        let baseDmg = null, healTotal = null;
         if (dmgFormula && parseDiceFormula(dmgFormula)) {
           const r = rollFormula(dmgFormula);
-          dmgTotal = r.total;
+          baseDmg = r.total;
           await DB.put('dice_rolls', makeDiceRoll({ campaignId, formula: dmgFormula, dice: r.dice, modifier: r.modifier, total: r.total, purpose: 'AoE effect damage' }));
         }
         if (healFormula && parseDiceFormula(healFormula)) {
@@ -4316,22 +4504,32 @@ async function ScreenMapView(root, campaignId, mapId) {
         const names = [];
         for (const t of targets) {
           const hp = t.kind === 'combatant' ? t.combatant.hp : t.char.hp;
-          if (dmgTotal !== null) hp.current = clamp(hp.current - dmgTotal, 0, hp.max);
-          if (healTotal !== null) hp.current = clamp(hp.current + healTotal, 0, hp.max);
-          if (condition) {
+          const info = aoeEntityInfo(t);
+          let saved = false;
+          if (saveDc > 0 && (baseDmg !== null || condition)) {
+            const bonus = saveBonusFor(info, saveAbility, profBonusForLevel(info.level));
+            const roll = rollD20(bonus, 'none');
+            saved = roll.total >= saveDc;
+            await DB.put('dice_rolls', makeDiceRoll({ campaignId, actorType: t.kind === 'combatant' && t.combatant.isBot ? 'bot' : 'player', actorId: t.kind === 'combatant' ? t.combatant.refId : t.char.id, formula: `1d20${bonus >= 0 ? '+' : ''}${bonus}`, dice: roll.rolls, modifier: bonus, total: roll.total, purpose: `${t.token.name} save vs DC ${saveDc}` }));
+          }
+          let noteParts = [];
+          if (baseDmg !== null) {
+            const amount = applyDamageWithResistance(saved ? Math.floor(baseDmg / 2) : baseDmg, dmgType, info);
+            hp.current = clamp(hp.current - amount, 0, hp.max);
+            noteParts.push(`${amount} dmg${saveDc > 0 ? (saved ? ' (saved, half)' : ' (failed save)') : ''}${resistanceMultiplier(dmgType, info) !== 1 ? ' (resisted)' : ''}`);
+          }
+          if (healTotal !== null) { hp.current = clamp(hp.current + healTotal, 0, hp.max); noteParts.push(`${healTotal} healing`); }
+          if (condition && !saved) {
             const conditions = t.kind === 'combatant' ? t.combatant.conditions : t.char.conditions;
             conditions.push({ conditionId: condition, source: 'aoe_effect', roundsRemaining: null });
+            noteParts.push(condition);
           }
           if (t.kind === 'combatant') await DB.put('encounters', activeEncounter);
           else await DB.put('characters', t.char);
-          names.push(t.token.name);
+          names.push(`${t.token.name} (${noteParts.join(', ') || 'no change'})`);
         }
-        const parts = [];
-        if (dmgTotal !== null) parts.push(`${dmgTotal} damage`);
-        if (healTotal !== null) parts.push(`${healTotal} healing`);
-        if (condition) parts.push(condition);
         const summary = names.length
-          ? `An area effect (${parts.join(', ') || 'no change'}) hits ${names.join(', ')}.`
+          ? `An area effect hits ${names.join('; ')}.`
           : `An area effect was triggered but no tokens were in range.`;
         await DB.put('log_entries', makeLogEntry({ campaignId, type: 'system', speakerType: 'system', text: summary }));
         closeModal();
@@ -4355,6 +4553,7 @@ async function ScreenMapView(root, campaignId, mapId) {
       </div>
       <div class="field" id="genericNameField" style="display:none"><label>Name</label><input type="text" id="genericNameInput" placeholder="Marker"></div>
       <div class="field"><label>Custom image (optional)</label><input type="file" id="tokenImageInput" accept="image/*"></div>
+      <div class="row"><button class="btn block" id="tokenGalleryBtn" type="button">Choose Portrait Instead…</button></div>
       <div class="row" style="margin-top:1rem">
         <button class="btn block" id="atCancel">Cancel</button>
         <button class="btn primary block" id="atAdd">Add</button>
@@ -4363,6 +4562,14 @@ async function ScreenMapView(root, campaignId, mapId) {
       const sel = rootEl.querySelector('#tokenSourceSelect');
       sel.onchange = () => { rootEl.querySelector('#genericNameField').style.display = sel.value === 'generic' ? '' : 'none'; };
       rootEl.querySelector('#atCancel').onclick = closeModal;
+      let galleryImageData = null;
+      rootEl.querySelector('#tokenGalleryBtn').onclick = () => {
+        openPortraitGallery((dataUrl) => {
+          galleryImageData = dataUrl;
+          rootEl.querySelector('#tokenImageInput').value = '';
+          toast('Portrait selected for this token.', 'success');
+        });
+      };
       rootEl.querySelector('#atAdd').onclick = async () => {
         let tokenData;
         if (sel.value === 'generic') {
@@ -4373,7 +4580,7 @@ async function ScreenMapView(root, campaignId, mapId) {
           tokenData = { refType: o.refType, refId: o.refId, name: o.label.split(' (')[0], color: o.color };
         }
         const imageFile = rootEl.querySelector('#tokenImageInput').files[0];
-        let imageData = null;
+        let imageData = galleryImageData;
         if (imageFile) imageData = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(imageFile); });
         const token = makeToken({ campaignId, mapId, ...tokenData, x: 1, y: 1 });
         token.imageData = imageData;

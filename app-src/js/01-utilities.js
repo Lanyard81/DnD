@@ -153,6 +153,27 @@ function isSideDefeated(order, hpLookup, sideOf, side) {
   if (members.length === 0) return true;
   return members.every(id => isCombatantDown(hpLookup[id]));
 }
+function resistanceMultiplier(damageType, entity) {
+  if (!damageType || !entity) return 1;
+  const type = String(damageType).trim().toLowerCase();
+  if (!type) return 1;
+  const has = (arr) => Array.isArray(arr) && arr.some(t => String(t).trim().toLowerCase() === type);
+  if (has(entity.immunities)) return 0;
+  if (has(entity.resistances)) return 0.5;
+  if (has(entity.vulnerabilities)) return 2;
+  return 1;
+}
+function applyDamageWithResistance(amount, damageType, entity) {
+  return Math.floor(Math.max(0, amount) * resistanceMultiplier(damageType, entity));
+}
+function saveBonusFor(info, ability, profBonus) {
+  const abilities = (info && info.abilities) || {};
+  const mod = Math.floor((Number(abilities[ability] ?? 10) - 10) / 2);
+  const st = ((info && info.savingThrows) || {})[ability];
+  if (typeof st === 'number') return st;
+  const proficient = !!(st && st.proficient);
+  return mod + (proficient ? Math.max(0, profBonus || 0) : 0);
+}
 
 // ---- Grid core functions ----
 // Mirrored 1:1 from src/grid-core.mjs (see tests/grid-core.test.mjs).

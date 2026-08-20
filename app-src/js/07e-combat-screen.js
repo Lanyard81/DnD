@@ -159,7 +159,7 @@ async function ScreenCombat(root, campaignId, encounterId) {
       <h2>${escapeHtml(attacker.name)} attacks</h2>
       <div class="field">
         <label>Attack</label>
-        <select id="atkSelect">${attackOptions.map((a, i) => `<option value="${i}">${escapeHtml(a.name)} (${escapeHtml(a.attackBonus)}, ${escapeHtml(a.damageDice)})</option>`).join('')}</select>
+        <select id="atkSelect">${attackOptions.map((a, i) => `<option value="${i}">${escapeHtml(a.name)} (${escapeHtml(a.attackBonus)}, ${escapeHtml(a.damageDice)})${a.attackCount > 1 ? ` — ×${a.attackCount}` : ''}</option>`).join('')}</select>
       </div>
       <div class="field">
         <label>Target</label>
@@ -174,10 +174,15 @@ async function ScreenCombat(root, campaignId, encounterId) {
       rootEl.querySelector('#atkGo').onclick = async () => {
         const atkIdx = parseInt(rootEl.querySelector('#atkSelect').value);
         const targetId = rootEl.querySelector('#tgtSelect').value;
-        const target = findCombatant(encounter, targetId);
-        const chosenAttacker = { ...attacker, attacks: [attackOptions[atkIdx]] };
+        const chosenAttack = attackOptions[atkIdx];
+        const chosenAttacker = { ...attacker, attacks: [chosenAttack] };
+        const swings = Math.max(1, chosenAttack.attackCount || 1);
         closeModal();
-        await combatAttack(encounter, chosenAttacker, target);
+        for (let i = 0; i < swings; i++) {
+          const target = findCombatant(encounter, targetId);
+          if (!target || isCombatantDown(target.hp.current)) break;
+          await combatAttack(encounter, chosenAttacker, target);
+        }
         await persist();
         if (await checkCombatEnd()) { render(); return; }
         render();

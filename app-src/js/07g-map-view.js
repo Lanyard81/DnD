@@ -325,15 +325,33 @@ async function ScreenMapView(root, campaignId, mapId) {
     }).filter(Boolean);
   }
 
+  // Normalizes a resolveAoeTargets() entry into the {abilities, savingThrows,
+  // level, resistances, immunities, vulnerabilities} shape saveBonusFor() and
+  // applyDamageWithResistance() expect, regardless of whether it's a live
+  // combatant (character or monster) or an out-of-combat character.
+  function aoeEntityInfo(t) {
+    const source = t.kind === 'combatant' ? t.combatant : t.char;
+    return {
+      abilities: source.abilities || {}, savingThrows: source.savingThrows || {}, level: source.level || 1,
+      resistances: source.resistances || [], immunities: source.immunities || [], vulnerabilities: source.vulnerabilities || []
+    };
+  }
+
   function openApplyEffectModal() {
     const targets = resolveAoeTargets();
     openModal(`
       <h2>Apply Effect</h2>
       ${targets.length ? `<p class="hint">Will affect: ${targets.map(t => escapeHtml(t.token.name)).join(', ')}</p>` : `<p class="hint">No damageable tokens are standing in the highlighted cells. Place tokens first, or this will just log a note.</p>`}
       <div class="field"><label>Damage formula (optional)</label><input type="text" id="aoeDamage" placeholder="e.g. 4d6"></div>
+      <div class="field"><label>Damage type (optional, for resistance/immunity/vulnerability)</label><input type="text" id="aoeDamageType" placeholder="e.g. fire"></div>
       <div class="field"><label>Heal formula (optional)</label><input type="text" id="aoeHeal" placeholder="e.g. 2d8"></div>
       <div class="field"><label>Condition to apply (optional)</label><input type="text" id="aoeCondition" placeholder="e.g. Prone" list="condSuggestListMap"></div>
       <datalist id="condSuggestListMap">${Object.keys(CONDITION_LIBRARY).map(c => `<option value="${c[0].toUpperCase() + c.slice(1)}">`).join('')}</datalist>
+      <div class="row" style="gap:.5rem">
+        <div class="field" style="flex:1"><label>Save DC (optional)</label><input type="number" id="aoeSaveDc" placeholder="e.g. 14"></div>
+        <div class="field" style="flex:1"><label>Save ability</label><select id="aoeSaveAbility">${ABILITIES.map(a => `<option value="${a}">${a.toUpperCase()}</option>`).join('')}</select></div>
+      </div>
+      <p class="hint">A save DC rolls each target's own saving throw: damage is halved and the condition is skipped on a success. Leave it blank to hit everyone automatically, as before.</p>
       <div class="row" style="margin-top:1rem">
         <button class="btn block" id="aoeEffectCancel">Cancel</button>
         <button class="btn primary block" id="aoeEffectGo">Apply</button>
@@ -342,12 +360,15 @@ async function ScreenMapView(root, campaignId, mapId) {
       rootEl.querySelector('#aoeEffectCancel').onclick = closeModal;
       rootEl.querySelector('#aoeEffectGo').onclick = async () => {
         const dmgFormula = rootEl.querySelector('#aoeDamage').value.trim();
+        const dmgType = rootEl.querySelector('#aoeDamageType').value.trim();
         const healFormula = rootEl.querySelector('#aoeHeal').value.trim();
         const condition = rootEl.querySelector('#aoeCondition').value.trim();
-        let dmgTotal = null, healTotal = null;
+        const saveDc = parseInt(rootEl.querySelector('#aoeSaveDc').value) || 0;
+        const saveAbility = rootEl.querySelector('#aoeSaveAbility').value;
+        let baseDmg = null, healTotal = null;
         if (dmgFormula && parseDiceFormula(dmgFormula)) {
           const r = rollFormula(dmgFormula);
-          dmgTotal = r.total;
+          baseDmg = r.total;
           await DB.put('dice_rolls', makeDiceRoll({ campaignId, formula: dmgFormula, dice: r.dice, modifier: r.modifier, total: r.total, purpose: 'AoE effect damage' }));
         }
         if (healFormula && parseDiceFormula(healFormula)) {
@@ -357,22 +378,32 @@ async function ScreenMapView(root, campaignId, mapId) {
         const names = [];
         for (const t of targets) {
           const hp = t.kind === 'combatant' ? t.combatant.hp : t.char.hp;
-          if (dmgTotal !== null) hp.current = clamp(hp.current - dmgTotal, 0, hp.max);
-          if (healTotal !== null) hp.current = clamp(hp.current + healTotal, 0, hp.max);
-          if (condition) {
+          const info = aoeEntityInfo(t);
+          let saved = false;
+          if (saveDc > 0 && (baseDmg !== null || condition)) {
+            const bonus = saveBonusFor(info, saveAbility, profBonusForLevel(info.level));
+            const roll = rollD20(bonus, 'none');
+            saved = roll.total >= saveDc;
+            await DB.put('dice_rolls', makeDiceRoll({ campaignId, actorType: t.kind === 'combatant' && t.combatant.isBot ? 'bot' : 'player', actorId: t.kind === 'combatant' ? t.combatant.refId : t.char.id, formula: `1d20${bonus >= 0 ? '+' : ''}${bonus}`, dice: roll.rolls, modifier: bonus, total: roll.total, purpose: `${t.token.name} save vs DC ${saveDc}` }));
+          }
+          let noteParts = [];
+          if (baseDmg !== null) {
+            const amount = applyDamageWithResistance(saved ? Math.floor(baseDmg / 2) : baseDmg, dmgType, info);
+            hp.current = clamp(hp.current - amount, 0, hp.max);
+            noteParts.push(`${amount} dmg${saveDc > 0 ? (saved ? ' (saved, half)' : ' (failed save)') : ''}${resistanceMultiplier(dmgType, info) !== 1 ? ' (resisted)' : ''}`);
+          }
+          if (healTotal !== null) { hp.current = clamp(hp.current + healTotal, 0, hp.max); noteParts.push(`${healTotal} healing`); }
+          if (condition && !saved) {
             const conditions = t.kind === 'combatant' ? t.combatant.conditions : t.char.conditions;
             conditions.push({ conditionId: condition, source: 'aoe_effect', roundsRemaining: null });
+            noteParts.push(condition);
           }
           if (t.kind === 'combatant') await DB.put('encounters', activeEncounter);
           else await DB.put('characters', t.char);
-          names.push(t.token.name);
+          names.push(`${t.token.name} (${noteParts.join(', ') || 'no change'})`);
         }
-        const parts = [];
-        if (dmgTotal !== null) parts.push(`${dmgTotal} damage`);
-        if (healTotal !== null) parts.push(`${healTotal} healing`);
-        if (condition) parts.push(condition);
         const summary = names.length
-          ? `An area effect (${parts.join(', ') || 'no change'}) hits ${names.join(', ')}.`
+          ? `An area effect hits ${names.join('; ')}.`
           : `An area effect was triggered but no tokens were in range.`;
         await DB.put('log_entries', makeLogEntry({ campaignId, type: 'system', speakerType: 'system', text: summary }));
         closeModal();
@@ -396,6 +427,7 @@ async function ScreenMapView(root, campaignId, mapId) {
       </div>
       <div class="field" id="genericNameField" style="display:none"><label>Name</label><input type="text" id="genericNameInput" placeholder="Marker"></div>
       <div class="field"><label>Custom image (optional)</label><input type="file" id="tokenImageInput" accept="image/*"></div>
+      <div class="row"><button class="btn block" id="tokenGalleryBtn" type="button">Choose Portrait Instead…</button></div>
       <div class="row" style="margin-top:1rem">
         <button class="btn block" id="atCancel">Cancel</button>
         <button class="btn primary block" id="atAdd">Add</button>
@@ -404,6 +436,14 @@ async function ScreenMapView(root, campaignId, mapId) {
       const sel = rootEl.querySelector('#tokenSourceSelect');
       sel.onchange = () => { rootEl.querySelector('#genericNameField').style.display = sel.value === 'generic' ? '' : 'none'; };
       rootEl.querySelector('#atCancel').onclick = closeModal;
+      let galleryImageData = null;
+      rootEl.querySelector('#tokenGalleryBtn').onclick = () => {
+        openPortraitGallery((dataUrl) => {
+          galleryImageData = dataUrl;
+          rootEl.querySelector('#tokenImageInput').value = '';
+          toast('Portrait selected for this token.', 'success');
+        });
+      };
       rootEl.querySelector('#atAdd').onclick = async () => {
         let tokenData;
         if (sel.value === 'generic') {
@@ -414,7 +454,7 @@ async function ScreenMapView(root, campaignId, mapId) {
           tokenData = { refType: o.refType, refId: o.refId, name: o.label.split(' (')[0], color: o.color };
         }
         const imageFile = rootEl.querySelector('#tokenImageInput').files[0];
-        let imageData = null;
+        let imageData = galleryImageData;
         if (imageFile) imageData = await new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(imageFile); });
         const token = makeToken({ campaignId, mapId, ...tokenData, x: 1, y: 1 });
         token.imageData = imageData;

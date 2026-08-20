@@ -52,9 +52,12 @@ Stat-block library (campaign-scoped + a global seed set with `campaignId: null`)
 ```
 { id, campaignId|null, name, size, type, ac, hp:{formula,max}, speed,
   abilities:{str,dex,con,int,wis,cha}, savingThrows, skills, resistances, immunities, vulnerabilities,
-  senses, languages, challengeRating, traits: [{name,text}], actions: [{name,attackBonus,damageDice,damageType,effectIds}],
+  senses, languages, challengeRating, traits: [{name,text}], actions: [{name,attackBonus,damageDice,damageType,attackCount,effectIds}],
   legendaryActions: [...] | null, tokenImage|null }
 ```
+- `savingThrows: {ability: totalBonus}` — a flat *total* per-ability bonus (e.g. `{dex: 4}`), matching how printed stat blocks list saves. This is a different shape from `characters.savingThrows` (`{ability: {proficient}}`, combined with ability mod + proficiency bonus at use time) — see `saveBonusFor()` in `combat-core.mjs`, which handles both shapes. Set via the homebrew Monster Library form's "Saving throw bonuses" field (`dex:4, wis:2` text, parsed to this object); empty/unset means "just use the ability mod."
+- `resistances`/`immunities`/`vulnerabilities: string[]` of lowercase damage-type tags (e.g. `"fire"`), matched case-insensitively against an attack/effect's damage type. Set via the homebrew Monster Library form; applied in `combatAttack` and the map view's AoE "Apply Effect" handler via `resistanceMultiplier()`/`applyDamageWithResistance()`. D20.
+- `actions[].attackCount` — how many times this action's attack resolves per turn (multiattack). Defaults to `1`; both `resolveBotTurn` and the manual "Roll Attack" flow loop `combatAttack` this many times against the current target, stopping early if the target drops. D20.
 
 ### `items`
 ```

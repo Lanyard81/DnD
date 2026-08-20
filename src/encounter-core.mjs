@@ -23,6 +23,20 @@ export function shortRestChanges(char, healAmount) {
   return { hp: { current, max: char.hp.max, temp: char.hp.temp } };
 }
 
+// Spell-slot resource tracking (D19 originally left bot casting unmetered —
+// this closes that gap). Both helpers mutate `char.spellSlots[level]`
+// in place and report whether a slot was actually available, so a caller
+// can fall back to a mundane action when casting isn't affordable.
+export function hasSpellSlot(char, level) {
+  const slot = char && char.spellSlots && char.spellSlots[level];
+  return !!(slot && slot.current > 0);
+}
+export function consumeSpellSlot(char, level) {
+  if (!hasSpellSlot(char, level)) return false;
+  char.spellSlots[level].current -= 1;
+  return true;
+}
+
 // Original, non-SRD mechanical reminder text for common condition names —
 // short flavor-neutral notes so a DM doesn't have to remember what a
 // condition does, without reproducing any copyrighted rules text. Matching

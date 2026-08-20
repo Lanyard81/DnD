@@ -7,15 +7,16 @@
 // hp/ac/conditions/attacks alongside refType/refId for traceability. This is
 // an intentional, documented extension of the schema, not a drift — see
 // DECISIONS.md D13.
-function makeMonster({ campaignId, name, ac, hpMax, attackName, attackBonus, damageDice, damageType }) {
+function makeMonster({ campaignId, name, ac, hpMax, attackName, attackBonus, damageDice, damageType, attackCount, resistances, immunities, vulnerabilities, savingThrows }) {
   return {
     id: uid(), campaignId: campaignId || null, name, size: 'medium', type: 'monstrosity',
     ac: ac || 10, hp: { formula: '', max: hpMax || 10 }, speed: 30,
     abilities: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
-    savingThrows: {}, skills: {}, resistances: [], immunities: [], vulnerabilities: [],
+    savingThrows: savingThrows || {}, skills: {},
+    resistances: resistances || [], immunities: immunities || [], vulnerabilities: vulnerabilities || [],
     senses: '', languages: '', challengeRating: 0,
     traits: [],
-    actions: [{ name: attackName || 'Strike', attackBonus: attackBonus || '+3', damageDice: damageDice || '1d6+1', damageType: damageType || 'bludgeoning' }],
+    actions: [{ name: attackName || 'Strike', attackBonus: attackBonus || '+3', damageDice: damageDice || '1d6+1', damageType: damageType || 'bludgeoning', attackCount: Math.max(1, attackCount || 1) }],
     legendaryActions: null, tokenImage: null
   };
 }
@@ -33,8 +34,8 @@ async function combatantFromCharacter(char, bot) {
   let spell = null;
   for (const spellId of (char.spellsKnown || [])) {
     const s = await DB.get('spells', spellId);
-    if (s && s.damageDice) { spell = { type: 'damage', formula: s.damageDice, name: s.name }; break; }
-    if (s && s.healFormula) { spell = { type: 'heal', formula: s.healFormula, name: s.name }; break; }
+    if (s && s.damageDice) { spell = { type: 'damage', formula: s.damageDice, name: s.name, level: s.level || 1 }; break; }
+    if (s && s.healFormula) { spell = { type: 'heal', formula: s.healFormula, name: s.name, level: s.level || 1 }; break; }
   }
   return {
     id: uid(), refType: 'character', refId: char.id,
@@ -42,6 +43,8 @@ async function combatantFromCharacter(char, bot) {
     hp: { current: char.hp.current, max: char.hp.max, temp: char.hp.temp || 0 },
     ac: char.ac, initiativeBonus: char.initiativeBonus || 0,
     primaryAbilityMod: Math.max(abilityMod(char.abilities.str), abilityMod(char.abilities.dex)),
+    abilities: char.abilities, savingThrows: char.savingThrows || {}, level: char.level || 1,
+    resistances: char.resistances || [], immunities: char.immunities || [], vulnerabilities: char.vulnerabilities || [],
     conditions: [], attacks: char.attacks || [], spell,
     isBot: char.controlledBy === 'bot',
     combatStyle: bot ? bot.combatStyle : 'moderate',
@@ -58,7 +61,9 @@ function combatantFromMonster(monster, index, total) {
     name: total > 1 ? `${monster.name} ${index + 1}` : monster.name, side: 'enemy',
     hp: { current: monster.hp.max, max: monster.hp.max, temp: 0 },
     ac: monster.ac, initiativeBonus: 0,
-    conditions: [], attacks: [{ id: uid(), name: action.name, attackBonus: action.attackBonus, damageDice: action.damageDice, damageType: action.damageType, notes: '' }],
+    abilities: monster.abilities || {}, savingThrows: monster.savingThrows || {},
+    resistances: monster.resistances || [], immunities: monster.immunities || [], vulnerabilities: monster.vulnerabilities || [],
+    conditions: [], attacks: [{ id: uid(), name: action.name, attackBonus: action.attackBonus, damageDice: action.damageDice, damageType: action.damageType, attackCount: Math.max(1, action.attackCount || 1), notes: '' }],
     isBot: true, combatStyle: 'simple', isHealer: false, role: 'minion', botId: null,
     initiativeRoll: 0, hasActed: false
   };
@@ -87,8 +92,13 @@ function encounterSideLookup(encounter) {
 async function startEncounter(campaignId, name, partyCombatants, monsterDrafts) {
   const combatants = [...partyCombatants];
   for (const draft of monsterDrafts) {
-    const monster = makeMonster({ campaignId, name: draft.name, ac: draft.ac, hpMax: draft.hp, attackBonus: draft.attackBonus, damageDice: draft.damageDice, damageType: draft.damageType });
-    await DB.put('monsters', monster);
+    // A draft picked from the homebrew Monster Library carries its source
+    // row's id — reuse that row instead of minting a new `monsters` entry,
+    // so repeated encounters with the same library monster don't pile up
+    // duplicate rows (see DECISIONS.md D20).
+    let monster = draft.libraryMonsterId ? await DB.get('monsters', draft.libraryMonsterId) : null;
+    if (!monster) monster = makeMonster({ campaignId, name: draft.name, ac: draft.ac, hpMax: draft.hp, attackBonus: draft.attackBonus, damageDice: draft.damageDice, damageType: draft.damageType });
+    if (!draft.libraryMonsterId) await DB.put('monsters', monster);
     for (let i = 0; i < draft.qty; i++) combatants.push(combatantFromMonster(monster, i, draft.qty));
   }
   combatants.forEach(c => { c.initiativeRoll = rollD20(c.initiativeBonus, 'none').total; });
@@ -120,10 +130,12 @@ async function combatAttack(encounter, attacker, target) {
     const dmgResult = rollFormula(dmgParsed);
     const dmgRoll = makeDiceRoll({ campaignId: encounter.campaignId, actorType: attacker.isBot ? 'bot' : 'player', actorId: attacker.refId, formula: atk.damageDice, dice: dmgResult.dice, modifier: dmgResult.modifier, total: dmgResult.total, purpose: `${atk.name} damage` });
     await DB.put('dice_rolls', dmgRoll);
-    let remaining = dmgResult.total;
+    const applied = applyDamageWithResistance(dmgResult.total, atk.damageType, target);
+    let remaining = applied;
     if (target.hp.temp > 0) { const absorbed = Math.min(target.hp.temp, remaining); target.hp.temp -= absorbed; remaining -= absorbed; }
     target.hp.current = clamp(target.hp.current - remaining, 0, target.hp.max);
-    resultSummary = `${attacker.name} hits ${target.name} with ${atk.name} for ${dmgResult.total} (${atk.damageType || 'damage'}). ${target.name} at ${target.hp.current}/${target.hp.max} HP.`;
+    const resistNote = applied !== dmgResult.total ? ` (${applied === 0 ? 'immune' : applied < dmgResult.total ? 'resisted' : 'vulnerable'}, ${applied} taken)` : '';
+    resultSummary = `${attacker.name} hits ${target.name} with ${atk.name} for ${dmgResult.total} (${atk.damageType || 'damage'})${resistNote}. ${target.name} at ${target.hp.current}/${target.hp.max} HP.`;
   } else {
     resultSummary = `${attacker.name} attacks ${target.name} with ${atk.name} and misses (rolled ${roll.total} vs AC ${target.ac}).`;
   }
@@ -165,10 +177,33 @@ async function resolveBotTurn(encounter, combatant) {
   const action = chooseBotAction(combatant.combatStyle, situation);
   if (action.type === 'attack') {
     const target = findCombatant(encounter, action.targetId);
-    if (target) return await combatAttack(encounter, combatant, target);
+    if (target) {
+      const atk = getPrimaryAttack(combatant);
+      const swings = Math.max(1, atk.attackCount || 1);
+      let last = null;
+      for (let i = 0; i < swings; i++) {
+        const liveTarget = findCombatant(encounter, target.id);
+        if (!liveTarget || isCombatantDown(liveTarget.hp.current)) break;
+        last = await combatAttack(encounter, combatant, liveTarget);
+      }
+      return last;
+    }
   } else if (action.type === 'cast') {
     const target = findCombatant(encounter, action.targetId);
-    if (target) return await combatCast(encounter, combatant, target, combatant.spell);
+    if (target) {
+      // Spell casting draws down a real spell slot on the underlying
+      // character (combatants are per-encounter snapshots — see D13 — so the
+      // slot lives on the DB row, not this object). No slot left, or this
+      // isn't a slot-tracked caster: fall back to a mundane attack instead
+      // of casting for free (closes D19's original "no slot consumption" gap).
+      const level = (combatant.spell && combatant.spell.level) || 1;
+      const char = combatant.refType === 'character' ? await DB.get('characters', combatant.refId) : null;
+      if (char && consumeSpellSlot(char, level)) {
+        await DB.put('characters', char);
+        return await combatCast(encounter, combatant, target, combatant.spell);
+      }
+      return await combatAttack(encounter, combatant, target);
+    }
   } else if (action.type === 'heal') {
     const target = findCombatant(encounter, action.targetId);
     if (target) return await combatHeal(encounter, combatant, target);

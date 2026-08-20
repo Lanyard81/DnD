@@ -88,6 +88,7 @@ async function ScreenEncounterBuilder(root, campaignId) {
       if (!m) return;
       const action = m.actions[0] || {};
       monsterDrafts.push({
+        libraryMonsterId: m.id,
         name: m.name, hp: m.hp.max, ac: m.ac,
         qty: clamp(parseInt(root.querySelector('#libraryMonsterQty').value) || 1, 1, 12),
         attackBonus: action.attackBonus || '+3', damageDice: action.damageDice || '1d6', damageType: action.damageType || 'bludgeoning'

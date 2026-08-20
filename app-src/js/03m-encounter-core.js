@@ -10,6 +10,15 @@ function shortRestChanges(char, healAmount) {
   const current = Math.min(char.hp.max, char.hp.current + Math.max(0, healAmount));
   return { hp: { current, max: char.hp.max, temp: char.hp.temp } };
 }
+function hasSpellSlot(char, level) {
+  const slot = char && char.spellSlots && char.spellSlots[level];
+  return !!(slot && slot.current > 0);
+}
+function consumeSpellSlot(char, level) {
+  if (!hasSpellSlot(char, level)) return false;
+  char.spellSlots[level].current -= 1;
+  return true;
+}
 const CONDITION_LIBRARY = {
   prone: 'Attacks against them from nearby have the edge; their own attacks don\'t.',
   restrained: 'Can\'t move. Attacks against them have the edge; their own attacks don\'t.',

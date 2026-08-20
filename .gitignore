@@ -1,1 +1,5 @@
 node_modules/
+
+# Raw source art for assets/portraits/ — full-res originals, not needed at
+# runtime (tools/prep-portraits.ps1 regenerates assets/portraits/ from here).
+/Profile Busts/

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isCombatantDown, advanceTurn, isSideDefeated } from '../src/combat-core.mjs';
+import { isCombatantDown, advanceTurn, isSideDefeated, resistanceMultiplier, applyDamageWithResistance, saveBonusFor } from '../src/combat-core.mjs';
 
 describe('isCombatantDown', () => {
   it('treats 0 or negative hp as down', () => {
@@ -73,5 +73,51 @@ describe('isSideDefeated', () => {
   it('is true (trivially) for a side with no members', () => {
     const hp = { p1: 5, p2: 5 };
     expect(isSideDefeated(order, hp, sideOf, 'neutral')).toBe(true);
+  });
+});
+
+describe('resistanceMultiplier / applyDamageWithResistance', () => {
+  it('is 1x with no matching tag', () => {
+    expect(resistanceMultiplier('fire', { resistances: ['cold'] })).toBe(1);
+    expect(applyDamageWithResistance(10, 'fire', { resistances: ['cold'] })).toBe(10);
+  });
+  it('halves (rounded down) on a resistance match, case-insensitively', () => {
+    expect(resistanceMultiplier('Fire', { resistances: ['fire'] })).toBe(0.5);
+    expect(applyDamageWithResistance(9, 'fire', { resistances: ['fire'] })).toBe(4);
+  });
+  it('doubles on a vulnerability match', () => {
+    expect(applyDamageWithResistance(9, 'cold', { vulnerabilities: ['cold'] })).toBe(18);
+  });
+  it('zeroes out on an immunity match', () => {
+    expect(applyDamageWithResistance(50, 'poison', { immunities: ['poison'] })).toBe(0);
+  });
+  it('immunity beats resistance beats vulnerability if a type is listed in more than one', () => {
+    expect(resistanceMultiplier('fire', { immunities: ['fire'], resistances: ['fire'], vulnerabilities: ['fire'] })).toBe(0);
+    expect(resistanceMultiplier('fire', { resistances: ['fire'], vulnerabilities: ['fire'] })).toBe(0.5);
+  });
+  it('is 1x with no damage type or no entity', () => {
+    expect(resistanceMultiplier('', { resistances: ['fire'] })).toBe(1);
+    expect(resistanceMultiplier('fire', null)).toBe(1);
+  });
+  it('never goes negative even if amount is negative', () => {
+    expect(applyDamageWithResistance(-5, 'fire', {})).toBe(0);
+  });
+});
+
+describe('saveBonusFor', () => {
+  it('uses a monster-style flat total bonus as-is, ignoring ability score', () => {
+    const info = { abilities: { dex: 20 }, savingThrows: { dex: 3 } };
+    expect(saveBonusFor(info, 'dex')).toBe(3);
+  });
+  it('computes a character-style bonus from ability mod + proficiency when proficient', () => {
+    const info = { abilities: { wis: 16 }, savingThrows: { wis: { proficient: true } } };
+    expect(saveBonusFor(info, 'wis', 2)).toBe(5); // +3 mod + 2 prof
+  });
+  it('omits proficiency bonus when not proficient', () => {
+    const info = { abilities: { wis: 16 }, savingThrows: { wis: { proficient: false } } };
+    expect(saveBonusFor(info, 'wis', 2)).toBe(3);
+  });
+  it('defaults to ability score 10 (mod 0) and no proficiency when data is missing', () => {
+    expect(saveBonusFor({}, 'str', 2)).toBe(0);
   });
 });

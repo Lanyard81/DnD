@@ -1,8 +1,30 @@
 import { describe, it, expect } from 'vitest';
 import {
   longRestChanges, shortRestChanges, getConditionReminder, CONDITION_LIBRARY,
-  threatScore, partyBudget, assessEncounterDifficulty
+  threatScore, partyBudget, assessEncounterDifficulty, hasSpellSlot, consumeSpellSlot
 } from '../src/encounter-core.mjs';
+
+describe('hasSpellSlot / consumeSpellSlot', () => {
+  it('reports a slot available when current > 0', () => {
+    const char = { spellSlots: { 1: { max: 4, current: 2 } } };
+    expect(hasSpellSlot(char, 1)).toBe(true);
+  });
+  it('reports unavailable when current is 0, or the level/spellSlots is missing entirely', () => {
+    expect(hasSpellSlot({ spellSlots: { 1: { max: 4, current: 0 } } }, 1)).toBe(false);
+    expect(hasSpellSlot({ spellSlots: {} }, 1)).toBe(false);
+    expect(hasSpellSlot({}, 1)).toBe(false);
+  });
+  it('consumes a slot and returns true when one is available', () => {
+    const char = { spellSlots: { 1: { max: 4, current: 2 } } };
+    expect(consumeSpellSlot(char, 1)).toBe(true);
+    expect(char.spellSlots[1].current).toBe(1);
+  });
+  it('returns false and leaves state unchanged when no slot is available', () => {
+    const char = { spellSlots: { 1: { max: 4, current: 0 } } };
+    expect(consumeSpellSlot(char, 1)).toBe(false);
+    expect(char.spellSlots[1].current).toBe(0);
+  });
+});
 
 describe('longRestChanges', () => {
   it('fully heals HP, clears temp HP, and clears conditions', () => {
