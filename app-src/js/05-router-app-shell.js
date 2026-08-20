@@ -69,11 +69,11 @@ function shellHtml(route) {
   const showBack = route.name !== 'landing' && route.name !== 'campaignList';
   return `
     <header class="topbar">
-      ${showBack ? `<button class="icon-btn" id="navBack" aria-label="Back">←</button>` : `<span style="width:40px"></span>`}
+      ${showBack ? `<button class="icon-btn" id="navBack" aria-label="Back">←</button>` : `<span class="app-icon">🎲</span>`}
       <h1>${escapeHtml(titles[route.name] || 'FableTable Solo')}</h1>
       <button class="icon-btn" id="navSettings" aria-label="Settings">⚙</button>
     </header>
-    <main class="screen" id="screenRoot"></main>
+    <main class="screen fadeUp" id="screenRoot"></main>
     <nav class="bottomnav">
       <button data-nav="landing"><span class="ico">🏠</span>Home</button>
       <button data-nav="campaignList"><span class="ico">📜</span>Campaigns</button>

@@ -65,7 +65,7 @@ async function ScreenCampaignList(root) {
 function openCampaignWizard() {
   const state = { name: '', description: '', rulesProfile: 'legacy', automationLevel: 'medium', aiDmEnabled: false, theme: getActiveTheme(), playMode: 'solo_party' };
   let step = 0;
-  const steps = ['Basics', 'Rules', 'Automation', 'Play mode', 'Theme'];
+  const steps = ['Basics', 'Rules', 'Automation', 'Play mode'];
 
   function render() {
     openModal(`
@@ -134,19 +134,6 @@ function openCampaignWizard() {
         </div>
       </div>
     `;
-    if (step === 4) return `
-      <div class="field">
-        <label>Theme</label>
-        <div class="theme-swatch-row">
-          ${THEMES.map(t => `
-            <div class="theme-swatch ${state.theme === t.id ? 'selected' : ''}" data-theme-pick="${t.id}">
-              <div class="sw-preview">${t.swatches.map(c => `<span style="background:${c}"></span>`).join('')}</div>
-              ${t.label}
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
     return '';
   }
 
@@ -174,9 +161,6 @@ function openCampaignWizard() {
     });
     const aiDmBtn = body.querySelector('#wfAiDm');
     if (aiDmBtn) aiDmBtn.onclick = () => { state.aiDmEnabled = !state.aiDmEnabled; body.innerHTML = wizardStepHtml(); wireWizardStep(body); };
-    body.querySelectorAll('[data-theme-pick]').forEach(el => {
-      el.onclick = () => { state.theme = el.getAttribute('data-theme-pick'); body.innerHTML = wizardStepHtml(); wireWizardStep(body); };
-    });
   }
 
   render();

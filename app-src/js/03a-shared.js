@@ -7,11 +7,15 @@ const PLAY_MODES = [
   { id: 'human_dm_party', label: 'I DM, bots play the party' },
   { id: 'multi_character', label: 'I play multiple characters, scripted DM runs the table' }
 ];
+// Colour theme presets — a name plus a primary/accent hex pair. Everything
+// else (50/100 tints, 700 shade) is derived at apply time by applyColorTheme()
+// in 07h-settings.js, so adding a preset here never means touching CSS.
 const THEMES = [
-  { id: 'dark_fantasy', label: 'Dark Fantasy', swatches: ['#17121c', '#b3893f', '#251e30'] },
-  { id: 'clean_modern', label: 'Clean Modern', swatches: ['#f4f5f7', '#3661d6', '#ffffff'] },
-  { id: 'parchment', label: 'Parchment', swatches: ['#ece0c4', '#8a2f22', '#f7f0dc'] },
-  { id: 'minimal', label: 'Minimal Utility', swatches: ['#ffffff', '#18181b', '#fafafa'] }
+  { id: 'indigoViolet', label: 'Indigo Violet', primary: '#4f46e5', accent: '#7c3aed' },
+  { id: 'ocean', label: 'Ocean', primary: '#0ea5e9', accent: '#0d9488' },
+  { id: 'forest', label: 'Forest', primary: '#16a34a', accent: '#65a30d' },
+  { id: 'sunset', label: 'Sunset', primary: '#ea580c', accent: '#db2777' },
+  { id: 'slateMono', label: 'Slate Mono', primary: '#475569', accent: '#0f172a' }
 ];
 
 function makeCampaign({ name, description, rulesProfile, automationLevel, aiDmEnabled, theme, playMode }) {
@@ -24,7 +28,7 @@ function makeCampaign({ name, description, rulesProfile, automationLevel, aiDmEn
     rulesProfile: RULES_PROFILES.includes(rulesProfile) ? rulesProfile : 'legacy',
     automationLevel: AUTOMATION_LEVELS.includes(automationLevel) ? automationLevel : 'medium',
     aiDmEnabled: !!aiDmEnabled,
-    theme: THEMES.some(t => t.id === theme) ? theme : 'dark_fantasy',
+    theme: theme || THEMES[0].id,
     playMode: PLAY_MODES.some(p => p.id === playMode) ? playMode : 'solo_party',
     createdAt: ts,
     updatedAt: ts,
