@@ -1,0 +1,112 @@
+# DECISIONS.md — FableTable Solo
+
+Running log of assumptions and decisions made without a blocking question back to the user, since the brief already supplies defaults for nearly everything. Each entry: **Decision**, **Why**, **Reversibility**.
+
+---
+
+## D1. Ship target: hand-written vanilla JS/CSS, no build step, ever
+**Decision:** Skip the "optional Vite dev build that compiles down to one file" path entirely. Develop directly as the final artifact: `index.html` (+ a `/src` split only if the file gets unwieldy, reassembled by a trivial concat script, not a bundler).
+**Why:** The brief allows either path but says to fall back to hand-written vanilla with no build step "if that's not practical." For a single developer (me, the assistant) working across many turns without a persistent dev server, a zero-build workflow is more reliable and matches "trivially easy to run" better than debugging a Vite inliner. It also removes an entire class of "works in dev, breaks in the shipped file" bugs.
+**Reversibility:** Easy to add a build step later if the file gets too large to hand-edit comfortably.
+
+## D2. UI approach: no framework, hand-rolled DOM/vDOM-lite via template functions
+**Decision:** Do not pull in Preact. Use small hand-written render functions (string templates → `innerHTML` for static-ish panels, targeted DOM updates for hot paths like the dice tray and initiative tracker).
+**Why:** Preact via CDN is allowed and fine, but for a solo personal app the added indirection (JSX-less `h()` calls, hooks patterns) costs more in review/maintenance than it saves, given no build step / no JSX transform is available at runtime. A tiny custom `render(container, html)` + event delegation pattern keeps everything debuggable by reading the file top to bottom.
+**Reversibility:** Medium — swapping to Preact later is possible but would touch most UI code. Low risk since app logic (rules engine, bot AI, data layer) is framework-agnostic by design (see ARCHITECTURE.md).
+
+## D3. Styling: hand-written CSS with CSS custom properties for theming, not Tailwind CDN
+**Decision:** Use plain CSS (inline `<style>`) with a token system (`--color-bg`, `--space-2`, etc.) rather than the Tailwind Play CDN build.
+**Why:** Tailwind's Play CDN does a runtime JIT compile of your class list on every page load, which is measurable dead weight on a phone opening a local file, and it's an external script tag — technically "loaded from a CDN," which conflicts with "fully offline after first load" unless it's cached by the service worker (and the plain-file mode has no service worker). Hand-written CSS keeps the single file 100% self-sufficient with zero external fetch even on first load.
+**Reversibility:** N/A — this is the more conservative/compliant choice, no reason to revisit unless CSS volume becomes unmanageable.
+
+## D4. IndexedDB access via a small hand-rolled wrapper, not a vendored library (Dexie etc.)
+**Decision:** Write a ~150-line promise-based IndexedDB helper (`db.js` module) instead of vendoring Dexie.js.
+**Why:** Our schema (see DATA_MODEL.md) is moderate, not exotic — object stores with simple indexes. A hand-rolled wrapper keeps the dependency count at zero and is easy to audit. Vendoring Dexie is not prohibited but adds ~25KB of code to review/maintain for functionality we can implement directly.
+**Reversibility:** Easy to swap in Dexie later behind the same wrapper interface if the hand-rolled version becomes a bottleneck.
+
+## D5. Validation: hand-rolled lightweight schema checks, not vendored Zod
+**Decision:** Write small `validate*(obj)` functions per entity type for import/export, rather than vendoring Zod.
+**Why:** Same reasoning as D4 — keeps dependency surface at zero. Our validation needs (required fields, type checks, enum checks, nested shape checks for a bounded set of entities) don't need a general-purpose schema library.
+**Reversibility:** Easy to layer Zod in later if homebrew-editor validation grows complex enough to justify it.
+
+## D6. Seeded RNG: `mulberry32` (public-domain, ~6 lines), vendored inline
+**Decision:** Use a small public-domain seeded PRNG for deterministic dice/content generation, not `Math.random()` alone.
+**Why:** Brief requires reproducible/shareable generation results. `Math.random()` can't be seeded. Mulberry32 is tiny, dependency-free, and easy to vendor inline (no CDN fetch).
+**Reversibility:** N/A, low-risk utility choice.
+
+## D7. Grid engine built abstract from day one; hex support stays behind a feature flag
+**Decision:** Build the map/grid module against a `GridSystem` interface (`cellToPixel`, `pixelToCell`, `neighbors`, `distance`) with a `SquareGrid` implementation now and a `HexGrid` stub gated by `FEATURE_FLAGS.hexGrid = false`.
+**Why:** Matches brief exactly ("hex grid behind a feature flag with the underlying grid abstraction supporting it later").
+**Reversibility:** N/A, this is the specified approach.
+
+## D8. Combat default: theater-of-the-mind, grid available on demand
+**Decision:** New encounters default to theater-of-the-mind (structured initiative + log-driven combat, no map required); the DM/player can promote an encounter to grid mode.
+**Why:** Matches brief exactly ("theater-of-the-mind should be the lighter-weight default on phone").
+**Reversibility:** N/A, specified.
+
+## D9. Single-file structure during development: one `index.html`, edited directly, sections marked with banner comments — **superseded by D18 after Phase 5**
+**Decision (original, Phases 1–5):** Rather than developing in a `/src` tree and concatenating, develop `index.html` directly, organized internally into clearly banner-commented sections in a stable order, so it reads like a small monolith rather than sprawl.
+**Why:** Combined with D1 (no build step), this avoided maintaining two parallel representations of the same code that could drift, while the file was still small enough to navigate as one document.
+**Reversibility:** This is the split that was anticipated here — see D18 below, where it happened after Phase 5 once the file passed ~3,500 lines and Phase 6 (a large homebrew-editor UI surface) was about to make that worse.
+
+## D18. Split `index.html` into `app-src/` modules + a Node concat build (post-Phase 5)
+**Decision:** After Phase 5, `index.html` (~3,550 lines) was split into `app-src/shell.head.html` / `shell.middle.html` / `shell.tail.html` (the static HTML skeleton), `app-src/styles.css` (all CSS), and `app-src/js/*.js` (one file per top-level or sub-section banner comment, e.g. `06b-character-wizard.js`, `07g-map-view.js`), listed in build order in `app-src/js-order.json`. `tools/build-single-file.mjs` (Node, zero npm dependencies — just `fs`) concatenates them back into `index.html`. The split was done with a throwaway one-time extraction script (not committed) that sliced the working file on its existing banner comments, then verified via `diff` that the rebuilt file matched the original except for one cosmetic blank line, plus a full in-browser smoke test (campaign/character/dice/bot/map creation) against the rebuilt file before trusting it.
+**Why:** The user was asked directly (rather than this being applied silently) once the file was flagged as approaching the D9 split-trigger size, right before Phase 6 (homebrew editor + DM dashboard) was about to add a large amount of new UI. They chose to split now rather than defer.
+**How this changes the dev workflow going forward:** Edit files under `app-src/`, never edit `index.html` directly (it's now a build artifact — `git status`/hand-edits to it will be overwritten by the next build). Run `npm run build` (`node tools/build-single-file.mjs`) after any `app-src/` change to regenerate `index.html`. The shipped `index.html` is unaffected by this change — it remains one self-contained file with zero runtime dependencies, no `<script type="module">` remote imports, and no reference back to `app-src/` or the build tool. This is a dev-time-only change, consistent with D1.
+**Reversibility:** Easy to reverse (just start editing `index.html` directly again and let `app-src/` go stale) but not expected to be reversed — the module split is expected to keep paying off through the remaining, larger phases.
+
+## D10. Testing: Vitest for rules-engine unit tests (dev-only, not shipped), Playwright skipped for MVP
+**Decision:** Add a `package.json` + Vitest *only* as a dev-time verification harness for pure-function rules logic (dice math, modifiers, initiative order, effect DSL resolution) extracted into testable modules. Playwright/E2E is treated as optional per the brief and replaced by the manual TEST_PLAN.md checklist for MVP.
+**Why:** Brief explicitly allows this substitution ("a documented manual test checklist... is an acceptable substitute"). Given this is a personal tool built across chat turns without a persistent CI runner, automated E2E adds overhead disproportionate to value right now.
+**Reversibility:** Easy to add Playwright later; TEST_PLAN.md is written so its manual checklist doubles as an E2E script outline if that happens.
+
+## D11. Name/content originality
+**Decision:** All classes, species, spells, monsters, NPCs, locations use original names inspired by generic fantasy tropes (e.g. "Stonewake" not any official place name, "Ashblade" not any official class), and mechanics use original wording (e.g. "Strain Points" style renames avoided unless needed — we describe mechanics in our own terms throughout, e.g. "Advantage/Disadvantage" as a generic dice mechanic term is treated as a generic/common TTRPG term, not WotC-exclusive IP, and is kept because the brief itself uses it as a mechanic name).
+**Why:** Directly required by NON-NEGOTIABLE CONSTRAINTS #1–2.
+**Reversibility:** N/A, mandatory constraint.
+
+## D13. Combat `encounters.combatants` extended beyond DATA_MODEL.md's original minimal ref shape
+**Decision:** DATA_MODEL.md originally specified `encounters.combatants` as lightweight refs: `{tokenId|characterId|monsterId, side}`. Phase 4 (built before Phase 5's map/token layer exists) instead stores full combatant *snapshot* objects: `{id, refType, refId, name, side, hp:{current,max,temp}, ac, initiativeBonus, initiativeRoll, conditions, attacks, isBot, combatStyle, isHealer, role, hasActed}`, keeping `refType`/`refId` for traceability back to the source `characters`/`monsters` row.
+**Why:** Two goblins spawned from the same monster template need independent HP/condition tracks, and there's no token/map layer yet to hang that per-instance state off of (that arrives in Phase 5). Snapshotting also protects an in-progress encounter from being corrupted if the underlying character sheet is edited mid-combat (e.g. player tweaks a stat while dueling). This is a deliberate, documented schema evolution, not accidental drift.
+**Reversibility:** Medium — when Phase 5 adds tokens, combatant snapshots and tokens will likely merge (a token gains the live-state fields combatants have now); revisit at that point rather than migrating now.
+
+## D14. Bot/monster combat action resolution is simplified, not a full 5E-style engine
+**Decision:** Bot/monster automatic turns (`resolveBotTurn`) only ever attack, heal (flat `1d8+2`), or hold — no spell selection, multi-attack, or resource (spell slot/ability use) tracking yet. A combatant with no authored `attacks` gets a synthesized "Improvised Attack" (`+2 + primary ability mod`, `1d6` + that same mod) so freshly-generated bots are immediately playable without hand-authoring weapons.
+**Why:** Matches the Phase 4 brief's explicit scope ("basic attack, damage/heal actions") and avoids building a full action-economy system before the Effect DSL (a later phase) exists to drive it properly. Building that now would be speculative and likely need rework once the Effect DSL lands.
+**Reversibility:** Easy — `chooseBotAction`'s returned `{type, targetId}` shape already anticipates more action types; `resolveBotTurn` is the only place that needs to grow to support them.
+
+## D15. Combat automation is not gated by automation level (yet)
+**Decision:** Attack resolution (roll → compare AC → roll damage → apply) always auto-applies regardless of the campaign's Light/Medium/Heavy automation setting, rather than requiring manual confirmation at Light.
+**Why:** Gating this cleanly needs a "propose, don't apply" pause-for-confirmation UX that doesn't exist yet; building it now for one setting value would be premature relative to the Heavy-tier Effect DSL work planned for a later phase, where the same confirmation affordance would be reused. Every result is still fully overridable after the fact (HP/conditions/turn order are all inline-editable), which preserves the "player can always override" requirement even without a pre-apply confirmation step.
+**Reversibility:** Easy — add a confirmation modal gated on `campaign.automationLevel === 'light'` in `combatAttack`/`resolveBotTurn` without touching the underlying resolution logic.
+
+## D16. Map walls/obstacles stored inline on the `maps` row, not a separate terrain store
+**Decision:** Line-of-sight-blocking cells live on `maps.blockedCells` (an array of `"x,y"` strings), toggled via the map view's "Walls" tool, rather than a new object store.
+**Why:** Phase 5 needs *some* notion of blocking terrain for the line-of-sight tool to be meaningful, but a full terrain/feature layer (different wall types, heights, destructible terrain) is out of scope for a personal solo tool. A flat cell-key array on the map row is the smallest thing that makes "basic line of sight" (an explicit brief requirement) actually work.
+**Reversibility:** Easy — if terrain ever needs richer typing, promote `blockedCells` to a proper store keyed by map, same pattern as `fog_of_war_state`.
+
+## D17. AoE templates highlight cells only — they do not auto-apply damage/effects to combatants
+**Decision:** The map view's AoE tool (circle/square/cone/line) computes and highlights affected cells but stops there; applying damage/conditions to whatever is standing in the template is a manual step (the DM/player reads the highlighted cells and applies effects via the existing combat HP/condition overrides).
+**Why:** Auto-applying AoE effects properly requires the Effect DSL (targets, save-for-half, resistances, etc.) that the brief explicitly scopes to a later, Heavy-automation phase ("extensible effect DSL with sample effects" is called out as separate future work in ARCHITECTURE.md §2.2). Wiring one-off AoE-to-damage logic now would be built on assumptions the real Effect DSL will likely contradict.
+**Reversibility:** Easy — the highlighted-cells list is already computed and available; a later phase can add an "Apply to combatants in template" action against it without touching the geometry code.
+
+## D12. No "5th Edition" trademark language in-product
+**Decision:** Product uses "5E-compatible" only in developer-facing docs (this repo's planning docs, README dev notes); in-app copy uses phrasing like "compatible with the world's most popular tabletop ruleset (OGL-style, homebrew implementation)" and a persistent disclaimer footer: "FableTable Solo is an independent, unofficial fan-made tool. Not affiliated with, endorsed by, or sponsored by Wizards of the Coast."
+**Why:** Constraint #2 requires a clear disclaimer; being conservative about trademark terms even in "compatible with" framing reduces risk.
+**Reversibility:** N/A.
+
+## D19. Post-launch additions (after the 7 planned phases): rest mechanics, condition reminders, difficulty heuristic, portraits, search, content packs, AoE-to-combat bridging, bot spellcasting, map travel, and hex grid
+**Decision:** After all 7 planned phases shipped, the user asked for a further batch of enhancements in one go. Delivered, each with a specific scoping choice:
+- **Rest mechanics**: long rest fully restores HP/spell slots/clears conditions; short rest heals a rolled `1d8+CON` (both per-character on the sheet and party-wide from the Table screen). No hit-dice pool is tracked — a flat once-per-rest roll, not a resource with its own economy.
+- **Condition reminders**: an original (non-SRD-text), case-insensitive lookup (`CONDITION_LIBRARY`) surfaces a one-line mechanical note wherever conditions are shown (character sheet, combat cards). It's informational only — nothing auto-applies advantage/disadvantage from it; the DM still adjudicates.
+- **Encounter difficulty heuristic**: `assessEncounterDifficulty` is a deliberately rough, original (not SRD-derived) HP-times-attack-bonus-vs-party-level-budget ratio shown in the Encounter Builder — explicitly labeled "not a hard rule," a sanity check, not a balancing algorithm.
+- **Portraits**: characters and tokens both gained optional image upload (`FileReader`→dataURL, same pattern as Phase 6's handout images). Tokens render the image clipped to a circle via an SVG `clipPath`.
+- **Search**: added to NPC Manager, Quest Tracker, and Journal & Lore once their lists exceed 4 items. Implemented with explicit focus/caret restoration after each re-render (the app's existing full-`innerHTML`-replace render pattern would otherwise kick focus out of the search box on every keystroke — a real bug caught and fixed during this work).
+- **Content packs**: a lighter, campaign-scoped-only export/import (`gatherContentPack`/`importContentPackFile`) for sharing just homebrew items/spells/features/conditions/tables/monsters between campaigns, distinct from the full-campaign backup — no cross-references to remap, so it's a much simpler "assign fresh id, attach to target campaign" pass than `remapCampaignExportIds`.
+- **AoE-to-combat bridge**: the map view's AoE tool gained "Apply Effect to Highlighted Cells," resolving tokens standing in the template to a live target — an active encounter's matching combatant if one exists, else the character directly — and applying a rolled damage/heal formula plus an optional condition. This is the piece that makes Map View and the Combat screen (previously fully independent systems — tokens on a map never referenced encounter combatants) actually talk to each other.
+- **Bot spellcasting**: `chooseBotAction` gained a `self.spell` input (`{type:'damage'|'heal', formula}`); a bot with a known heal spell can heal without the `isHealer` flag, and an Advanced-tier bot with a damage spell casts it instead of attacking (still respecting existing target-priority logic). Combatant snapshots pick up a character's first spell (from `spellsKnown`) that has a `damageDice` or `healFormula` set in the homebrew Spells library — two new optional fields added to that schema. No spell-slot consumption is modeled for bots (flavor/tactical variety, not a constrained resource) — a deliberate simplification, same spirit as D14's original attack/heal/hold scope note.
+- **Map travel**: `campaign.currentMapId` (an additive field, not in the original DATA_MODEL.md campaign shape) tracks "where the party currently is" across a campaign's multiple maps; a "🧭 Travel Here" action on the Map List switches it and logs the journey.
+- **Hex grid**: `src/hex-core.mjs` implements the `HexGrid` side of the interface anticipated by D7 (pointy-top axial coordinates, distance/radius/line/cone/line-of-sight), and `FEATURE_FLAGS.hexGrid` flipped to `true`. Map View branches its cell math through a small set of grid-dispatch helpers (`cellCenterPixel`, `pixelToCell`, `radiusCells`, `blockShapeCells`, `coneCells`, `lineCells`, `checkLineOfSight`) so almost none of the surrounding UI code needed to know which grid type it's drawing. Two scoping simplifications, both documented inline in code: hex maps use a plain rectangular `{q,r}` loop rather than an offset-coordinate correction (so the grid reads as a parallelogram, not a true rectangle — still fully correct hex math, just a different visible outline), and hex has no distinct "square/cube" AoE shape, so that option reuses the same filled-disk logic as "circle" on hex maps.
+
+**Why (for the batch as a whole):** The user explicitly asked for "all" of a list of suggestions after the initial 7-phase build was already reviewed as done. Each item above still went through the same bar as the rest of the project — a pure, unit-tested core where the logic was non-trivial (rest math, condition lookup, difficulty heuristic, hex geometry all have real tests), and manual in-browser verification of every UI path before considering it finished, including a real bug found and fixed (the search-input focus loss) rather than assumed away.
+**Reversibility:** Each item is additive and independently reversible without touching the others — e.g. hex grid could be flagged back off, spellcasting could be ignored by bots with no `spellsKnown` set, content packs are just another store-agnostic import path alongside the existing full-campaign one.

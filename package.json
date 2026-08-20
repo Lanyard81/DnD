@@ -1,0 +1,14 @@
+{
+  "name": "fabletable-solo-dev",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dev-only test harness + build tooling for FableTable Solo. The shipped app is index.html — this package.json is never required to run it.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "build": "node tools/build-single-file.mjs"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
+  }
+}
