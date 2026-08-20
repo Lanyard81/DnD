@@ -21,6 +21,8 @@ The entire shipped deliverable is **one file: `index.html`**. Open it directly (
 - The repo was pushed to `https://github.com/Lanyard81/DnD` this session (initial commit, `main` branch). **GitHub Pages is enabled and confirmed working** on a real phone.
 - **The service worker is confirmed working**: tested offline (airplane mode, after a first successful load) on a real phone — the app opened and functioned with no network. This closes the one verification gap left at the end of the original build.
 - A **bundled portrait gallery** was added post-handoff: 25 user-supplied fantasy bust portraits, resized/compressed and shipped under `assets/portraits/`, selectable from character sheets and map-view tokens alongside the existing custom-upload option. See STATUS.md for details.
+- **Deeper combat systems (D20)**: spell-slot tracking, monster multiattack, and per-target AoE saves/resistances, plus a monster-library duplicate-row fix — see §6 item 4 and STATUS.md/DECISIONS.md D20.
+- **5 new sample adventures** ("The Sunken Vault," "The Widow's Orchard," "The Masked Court," "The Cinderfall Depths," "The Kraken's Toll") were added alongside the original 3, loadable into any campaign from the DM Dashboard's "Load a Sample Adventure" button — same mechanism, no new UI. 8 total now. See STATUS.md for details.
 
 ## 3. What's been completed
 
